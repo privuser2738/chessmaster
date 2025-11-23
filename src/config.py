@@ -93,6 +93,50 @@ CHESS_TOPICS = [
 ]
 
 # Trusted chess websites for content
+
+
+# Historical and AI chess topics for documentary mode
+HISTORICAL_TOPICS = [
+    # Origins and History
+    "history of chess origins india",
+    "chess history ancient persia",
+    "evolution of chess pieces history",
+    "first chess tournament history 1851",
+    "chess world championship history",
+
+    # Famous Historical Players
+    "bobby fischer biography chess",
+    "garry kasparov career history",
+    "magnus carlsen world champion",
+    "paul morphy chess prodigy",
+    "mikhail botvinnik soviet chess",
+
+    # AI and Computer Chess
+    "deep blue vs kasparov 1997",
+    "computer chess history development",
+    "stockfish chess engine strongest",
+    "alphazero google deepmind chess",
+    "mechanical turk chess automaton 1770",
+    "neural network chess engines",
+
+    # Historic Matches
+    "match of the century fischer spassky 1972",
+    "kasparov deep blue 1997 rematch",
+    "immortal chess game anderssen",
+    "greatest chess games history",
+]
+
+# Image search topics
+IMAGE_SEARCH_TOPICS = [
+    "deep blue ibm chess computer photo",
+    "garry kasparov chess player",
+    "bobby fischer photos",
+    "mechanical turk automaton",
+    "chess tournament historical photos",
+    "alphazero chess",
+    "vintage chess photographs",
+]
+
 CHESS_DOMAINS = [
     "chess.com",
     "lichess.org",

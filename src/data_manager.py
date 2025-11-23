@@ -60,6 +60,7 @@ class PresentationQueue:
     def add_lesson(self, lesson: Lesson):
         """Add a lesson to the queue"""
         self._queue.put(lesson)
+        print(f'[Queue] ADDED: {lesson.id[:8]} - size: {self._queue.qsize()}')
 
     def get_next_lesson(self, timeout: float = None) -> Optional[Lesson]:
         """Get the next lesson, marking current as completed"""
@@ -68,6 +69,7 @@ class PresentationQueue:
                 self._current.status = "completed"
                 self._completed.append(self._current)
                 self._lessons_played += 1
+                self._current = None
 
         try:
             lesson = self._queue.get(timeout=timeout)
