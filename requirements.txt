@@ -1,0 +1,20 @@
+# ChessMaster - Chess Learning Presentation System
+# Requirements
+
+# Web scraping and searching
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+duckduckgo-search>=4.0.0
+
+# PDF processing (optional but recommended)
+PyPDF2>=3.0.0
+
+# Image processing
+Pillow>=10.0.0
+
+# GUI (usually included with Python on Windows)
+# tkinter - comes with Python standard library
+
+# Optional: For better HTML parsing
+lxml>=4.9.0
+html5lib>=1.1
