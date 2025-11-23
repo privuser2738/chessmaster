@@ -1,10 +1,13 @@
 """
 Data Manager Module
 Handles storage, retrieval, and organization of chess content
+Supports presentation queue system with continuous background generation
 """
 import json
 import os
 import random
+import threading
+import queue
 from pathlib import Path
 from typing import List, Dict, Optional, Generator
 from dataclasses import dataclass, asdict, field
@@ -27,18 +30,72 @@ class Slide:
     images: List[str]  # Local image paths
     source_url: str
     topic: str
-    slide_type: str  # 'content', 'image', 'quote', 'title', 'summary'
+    slide_type: str  # 'content', 'image', 'quote', 'title', 'summary', 'transition'
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
 
 
 @dataclass
-class Presentation:
-    """Represents a presentation session"""
+class Lesson:
+    """Represents a complete lesson/presentation that plays once"""
     id: str
-    name: str
+    title: str
+    topic: str
     slides: List[Slide]
     created_at: str
-    topics_covered: List[str]
+    source_urls: List[str]
+    estimated_duration: float  # seconds at speed 100
+    status: str = "pending"  # pending, playing, completed
+
+
+class PresentationQueue:
+    """Thread-safe queue for managing lessons"""
+
+    def __init__(self):
+        self._queue: queue.Queue[Lesson] = queue.Queue()
+        self._completed: List[Lesson] = []
+        self._current: Optional[Lesson] = None
+        self._lock = threading.Lock()
+        self._lessons_played = 0
+
+    def add_lesson(self, lesson: Lesson):
+        """Add a lesson to the queue"""
+        self._queue.put(lesson)
+
+    def get_next_lesson(self, timeout: float = None) -> Optional[Lesson]:
+        """Get the next lesson, marking current as completed"""
+        with self._lock:
+            if self._current:
+                self._current.status = "completed"
+                self._completed.append(self._current)
+                self._lessons_played += 1
+
+        try:
+            lesson = self._queue.get(timeout=timeout)
+            with self._lock:
+                lesson.status = "playing"
+                self._current = lesson
+            return lesson
+        except queue.Empty:
+            return None
+
+    @property
+    def size(self) -> int:
+        return self._queue.qsize()
+
+    @property
+    def current(self) -> Optional[Lesson]:
+        return self._current
+
+    @property
+    def lessons_played(self) -> int:
+        return self._lessons_played
+
+    @property
+    def completed_lessons(self) -> List[Lesson]:
+        return self._completed.copy()
+
+    def is_empty(self) -> bool:
+        return self._queue.empty()
 
 
 class DataManager:
@@ -46,8 +103,9 @@ class DataManager:
 
     def __init__(self):
         self.content_cache: Dict[str, dict] = {}
-        self.slide_queue: List[Slide] = []
-        self.current_presentation: Optional[Presentation] = None
+        self.used_content_ids: set = set()  # Track which content has been used
+        self.presentation_queue = PresentationQueue()
+        self._lock = threading.Lock()
         self._load_existing_content()
 
     def _load_existing_content(self):
@@ -65,11 +123,12 @@ class DataManager:
     def get_all_images(self) -> List[str]:
         """Get all available image paths"""
         images = []
-        for topic_dir in IMAGES_DIR.iterdir():
-            if topic_dir.is_dir():
-                for img_file in topic_dir.glob("*"):
-                    if img_file.suffix.lower() in ['.jpg', '.jpeg', '.png', '.gif', '.webp']:
-                        images.append(str(img_file))
+        if IMAGES_DIR.exists():
+            for topic_dir in IMAGES_DIR.iterdir():
+                if topic_dir.is_dir():
+                    for img_file in topic_dir.glob("*"):
+                        if img_file.suffix.lower() in ['.jpg', '.jpeg', '.png', '.gif', '.webp']:
+                            images.append(str(img_file))
         return images
 
     def get_images_for_topic(self, topic: str) -> List[str]:
@@ -80,22 +139,35 @@ class DataManager:
                     if f.suffix.lower() in ['.jpg', '.jpeg', '.png', '.gif', '.webp']]
         return []
 
+    def get_unused_content(self) -> Optional[dict]:
+        """Get content that hasn't been used in a presentation yet"""
+        with self._lock:
+            unused = [c for cid, c in self.content_cache.items()
+                      if cid not in self.used_content_ids]
+            if unused:
+                content = random.choice(unused)
+                self.used_content_ids.add(content['id'])
+                return content
+            # If all content used, reset and start over
+            if self.content_cache:
+                self.used_content_ids.clear()
+                content = random.choice(list(self.content_cache.values()))
+                self.used_content_ids.add(content['id'])
+                return content
+        return None
+
     def get_random_content(self) -> Optional[dict]:
         """Get a random content item"""
         if self.content_cache:
             return random.choice(list(self.content_cache.values()))
         return None
 
-    def get_content_by_topic(self, topic: str) -> List[dict]:
-        """Get all content items for a topic"""
-        return [c for c in self.content_cache.values()
-                if topic.lower() in c.get('topic', '').lower()]
-
     def add_content(self, content_dict: dict):
         """Add new content to the cache"""
         content_id = content_dict.get('id')
         if content_id:
-            self.content_cache[content_id] = content_dict
+            with self._lock:
+                self.content_cache[content_id] = content_dict
             # Save to disk
             content_file = CONTENT_DIR / f"{content_id}.json"
             with open(content_file, 'w', encoding='utf-8') as f:
@@ -142,8 +214,8 @@ class DataManager:
                 slide_type='content'
             ))
 
-        # Image showcase slides
-        for i, img in enumerate(images[:3]):
+        # Image showcase slides (if we have images)
+        for i, img in enumerate(images[:2]):
             slides.append(Slide(
                 id=f"{content_id}_image_{i}",
                 title=f"{topic.title()} - Visual",
@@ -157,90 +229,116 @@ class DataManager:
 
         return slides
 
-    def generate_slides(self, max_slides: int = 50) -> Generator[Slide, None, None]:
-        """Generate slides from available content (infinite generator)"""
-        while True:
-            # Shuffle content for variety
-            content_items = list(self.content_cache.values())
-            random.shuffle(content_items)
+    def build_lesson(self, content_items: List[dict], topic: str) -> Lesson:
+        """Build a complete lesson from multiple content items"""
+        lesson_id = hashlib.md5(
+            f"{topic}_{datetime.now().isoformat()}".encode()
+        ).hexdigest()[:10]
 
-            for content in content_items:
-                slides = self.create_slides_from_content(content)
-                for slide in slides:
-                    yield slide
+        all_slides = []
+        source_urls = []
 
-            # If no content yet, yield placeholder
-            if not content_items:
-                yield Slide(
-                    id="loading",
-                    title="Loading Chess Content...",
-                    content="Searching the web for chess tutorials and lessons...",
+        # Intro slide
+        all_slides.append(Slide(
+            id=f"{lesson_id}_intro",
+            title=f"Lesson: {topic.title()}",
+            content=f"Welcome to this lesson on {topic}.\nLet's explore this topic together.",
+            excerpts=[],
+            images=[],
+            source_url="",
+            topic=topic,
+            slide_type='title'
+        ))
+
+        # Build slides from each content item
+        for idx, content in enumerate(content_items):
+            slides = self.create_slides_from_content(content)
+            all_slides.extend(slides)
+            if content.get('url'):
+                source_urls.append(content['url'])
+
+            # Add transition between content items
+            if idx < len(content_items) - 1:
+                all_slides.append(Slide(
+                    id=f"{lesson_id}_trans_{len(all_slides)}",
+                    title="Continuing...",
+                    content="Let's explore more about this topic.",
                     excerpts=[],
                     images=[],
                     source_url="",
-                    topic="loading",
-                    slide_type='title'
-                )
+                    topic=topic,
+                    slide_type='transition'
+                ))
 
-    def queue_slides(self, slides: List[Slide]):
-        """Add slides to the presentation queue"""
-        self.slide_queue.extend(slides)
+        # Summary slide
+        all_slides.append(Slide(
+            id=f"{lesson_id}_summary",
+            title=f"Lesson Complete: {topic.title()}",
+            content=f"You've completed this lesson on {topic}.\n\nNext lesson loading...",
+            excerpts=[],
+            images=[],
+            source_url="",
+            topic=topic,
+            slide_type='summary'
+        ))
 
-    def get_next_slide(self) -> Optional[Slide]:
-        """Get the next slide from the queue"""
-        if self.slide_queue:
-            return self.slide_queue.pop(0)
-        return None
+        # Estimate duration (5 seconds per slide at speed 100)
+        estimated_duration = len(all_slides) * 5.0
 
-    def get_queue_size(self) -> int:
-        """Get current queue size"""
-        return len(self.slide_queue)
-
-    def start_presentation(self, name: str = None) -> Presentation:
-        """Start a new presentation session"""
-        pres_id = hashlib.md5(datetime.now().isoformat().encode()).hexdigest()[:8]
-        name = name or f"Chess Learning Session {pres_id}"
-
-        self.current_presentation = Presentation(
-            id=pres_id,
-            name=name,
-            slides=[],
+        return Lesson(
+            id=lesson_id,
+            title=f"Chess Lesson: {topic.title()}",
+            topic=topic,
+            slides=all_slides,
             created_at=datetime.now().isoformat(),
-            topics_covered=[]
+            source_urls=source_urls,
+            estimated_duration=estimated_duration
         )
 
-        return self.current_presentation
+    def queue_lesson(self, lesson: Lesson):
+        """Add a lesson to the presentation queue"""
+        self.presentation_queue.add_lesson(lesson)
+        self._save_lesson(lesson)
 
-    def add_slide_to_presentation(self, slide: Slide):
-        """Add a slide to the current presentation"""
-        if self.current_presentation:
-            self.current_presentation.slides.append(slide)
-            if slide.topic not in self.current_presentation.topics_covered:
-                self.current_presentation.topics_covered.append(slide.topic)
+    def get_next_lesson(self, timeout: float = None) -> Optional[Lesson]:
+        """Get the next lesson to play"""
+        return self.presentation_queue.get_next_lesson(timeout)
 
-    def save_presentation(self):
-        """Save the current presentation to disk"""
-        if self.current_presentation:
-            pres_file = PRESENTATIONS_DIR / f"{self.current_presentation.id}.json"
-            pres_data = {
-                'id': self.current_presentation.id,
-                'name': self.current_presentation.name,
-                'created_at': self.current_presentation.created_at,
-                'topics_covered': self.current_presentation.topics_covered,
-                'slide_count': len(self.current_presentation.slides),
-                'slides': [asdict(s) for s in self.current_presentation.slides[-100:]]  # Keep last 100
-            }
-            with open(pres_file, 'w', encoding='utf-8') as f:
-                json.dump(pres_data, f, indent=2)
+    def get_queue_status(self) -> Dict:
+        """Get current queue status"""
+        return {
+            'queue_size': self.presentation_queue.size,
+            'lessons_played': self.presentation_queue.lessons_played,
+            'current_lesson': self.presentation_queue.current.title if self.presentation_queue.current else None,
+            'is_empty': self.presentation_queue.is_empty()
+        }
+
+    def _save_lesson(self, lesson: Lesson):
+        """Save lesson to disk"""
+        lesson_file = PRESENTATIONS_DIR / f"lesson_{lesson.id}.json"
+        lesson_data = {
+            'id': lesson.id,
+            'title': lesson.title,
+            'topic': lesson.topic,
+            'created_at': lesson.created_at,
+            'source_urls': lesson.source_urls,
+            'slide_count': len(lesson.slides),
+            'estimated_duration': lesson.estimated_duration,
+            'slides': [asdict(s) for s in lesson.slides]
+        }
+        with open(lesson_file, 'w', encoding='utf-8') as f:
+            json.dump(lesson_data, f, indent=2, ensure_ascii=False)
 
     def get_statistics(self) -> Dict:
         """Get statistics about stored data"""
         return {
             'total_content_items': len(self.content_cache),
             'total_images': len(self.get_all_images()),
-            'queue_size': self.get_queue_size(),
+            'unused_content': len(self.content_cache) - len(self.used_content_ids),
+            'queue_size': self.presentation_queue.size,
+            'lessons_played': self.presentation_queue.lessons_played,
             'topics': list(set(c.get('topic', '') for c in self.content_cache.values())),
-            'presentations_saved': len(list(PRESENTATIONS_DIR.glob("*.json")))
+            'lessons_saved': len(list(PRESENTATIONS_DIR.glob("lesson_*.json")))
         }
 
 

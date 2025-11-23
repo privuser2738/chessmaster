@@ -1,6 +1,6 @@
 """
 Full-Screen Presentation Engine
-Displays chess learning content in an infinite presentation loop
+Displays chess lessons sequentially (no looping), with dynamic pacing
 """
 import tkinter as tk
 from tkinter import ttk, font as tkfont
@@ -8,45 +8,53 @@ from PIL import Image, ImageTk
 import threading
 import queue
 import time
-import textwrap
-from typing import Optional, Callable
+import random
+from typing import Optional, Callable, List
 from dataclasses import dataclass
 
 from config import (
     BACKGROUND_COLOR, TEXT_COLOR, ACCENT_COLOR, SECONDARY_COLOR,
     PRESENTATION_TITLE, DEFAULT_SPEED, calculate_delay
 )
-from data_manager import Slide
+from data_manager import Slide, Lesson
 
 
 class PresentationEngine:
-    """Full-screen presentation engine with speed control"""
+    """Full-screen presentation engine with lesson-based sequential playback"""
 
-    def __init__(self, on_need_content: Callable = None):
+    def __init__(self, on_need_lesson: Callable = None):
         self.root = None
         self.running = False
         self.paused = False
         self.speed = DEFAULT_SPEED
-        self.current_slide: Optional[Slide] = None
-        self.slide_queue = queue.Queue()
-        self.on_need_content = on_need_content
+        self.on_need_lesson = on_need_lesson
+
+        # Lesson management
+        self.lesson_queue: queue.Queue[Lesson] = queue.Queue()
+        self.current_lesson: Optional[Lesson] = None
+        self.current_slide_index = 0
+        self.lessons_completed = 0
+        self.total_slides_shown = 0
+
+        # State tracking
+        self.waiting_for_content = False
+        self.base_delay_multiplier = 1.0  # Can increase when waiting
 
         # UI elements
         self.canvas = None
         self.title_label = None
-        self.content_frame = None
+        self.content_label = None
         self.image_label = None
         self.status_label = None
         self.speed_label = None
-        self.progress_bar = None
+        self.lesson_label = None
+        self.progress_label = None
 
         # Image cache
-        self.current_image = None
         self.photo_image = None
 
         # Threading
         self.presentation_thread = None
-        self.content_thread = None
 
     def setup_ui(self):
         """Initialize the tkinter UI"""
@@ -62,10 +70,11 @@ class PresentationEngine:
         self.screen_height = self.root.winfo_screenheight()
 
         # Custom fonts
-        self.title_font = tkfont.Font(family="Segoe UI", size=42, weight="bold")
-        self.content_font = tkfont.Font(family="Segoe UI", size=24)
+        self.title_font = tkfont.Font(family="Segoe UI", size=38, weight="bold")
+        self.content_font = tkfont.Font(family="Segoe UI", size=22)
         self.small_font = tkfont.Font(family="Segoe UI", size=14)
         self.topic_font = tkfont.Font(family="Segoe UI", size=18, slant="italic")
+        self.lesson_font = tkfont.Font(family="Segoe UI", size=16, weight="bold")
 
         # Main container
         self.main_frame = tk.Frame(self.root, bg=BACKGROUND_COLOR)
@@ -73,19 +82,29 @@ class PresentationEngine:
 
         # Header with title and controls
         self.header_frame = tk.Frame(self.main_frame, bg=BACKGROUND_COLOR)
-        self.header_frame.pack(fill=tk.X, pady=(0, 20))
+        self.header_frame.pack(fill=tk.X, pady=(0, 15))
 
         # App title
         app_title = tk.Label(
             self.header_frame,
-            text="♔ ChessMaster Learning System ♔",
+            text="ChessMaster Learning System",
             font=tkfont.Font(family="Segoe UI", size=20, weight="bold"),
             fg=ACCENT_COLOR,
             bg=BACKGROUND_COLOR
         )
         app_title.pack(side=tk.LEFT)
 
-        # Speed control frame
+        # Lesson info (center)
+        self.lesson_label = tk.Label(
+            self.header_frame,
+            text="Preparing first lesson...",
+            font=self.lesson_font,
+            fg=TEXT_COLOR,
+            bg=BACKGROUND_COLOR
+        )
+        self.lesson_label.pack(side=tk.LEFT, padx=50)
+
+        # Speed control frame (right)
         self.control_frame = tk.Frame(self.header_frame, bg=BACKGROUND_COLOR)
         self.control_frame.pack(side=tk.RIGHT)
 
@@ -114,7 +133,7 @@ class PresentationEngine:
         # Status indicator
         self.status_label = tk.Label(
             self.control_frame,
-            text="● RUNNING",
+            text="RUNNING",
             font=self.small_font,
             fg="#4ade80",
             bg=BACKGROUND_COLOR
@@ -132,7 +151,7 @@ class PresentationEngine:
         # Topic label
         self.topic_label = tk.Label(
             self.text_frame,
-            text="Topic: Loading...",
+            text="",
             font=self.topic_font,
             fg=ACCENT_COLOR,
             bg=SECONDARY_COLOR,
@@ -143,7 +162,7 @@ class PresentationEngine:
         # Title
         self.title_label = tk.Label(
             self.text_frame,
-            text="Loading...",
+            text="Welcome to ChessMaster",
             font=self.title_font,
             fg=TEXT_COLOR,
             bg=SECONDARY_COLOR,
@@ -160,7 +179,7 @@ class PresentationEngine:
         # Content text
         self.content_label = tk.Label(
             self.text_frame,
-            text="Searching the web for chess content...",
+            text="Preparing your chess lessons...\n\nContent is being fetched from the web.",
             font=self.content_font,
             fg=TEXT_COLOR,
             bg=SECONDARY_COLOR,
@@ -193,8 +212,8 @@ class PresentationEngine:
         # Image display
         self.image_label = tk.Label(
             self.image_frame,
-            text="♞",
-            font=tkfont.Font(family="Segoe UI", size=200),
+            text="♔",
+            font=tkfont.Font(family="Segoe UI", size=180),
             fg=ACCENT_COLOR,
             bg=SECONDARY_COLOR
         )
@@ -204,17 +223,27 @@ class PresentationEngine:
         self.footer_frame = tk.Frame(self.main_frame, bg=BACKGROUND_COLOR)
         self.footer_frame.pack(fill=tk.X, pady=(20, 0))
 
-        # Progress info
-        self.progress_label = tk.Label(
+        # Slide progress (left)
+        self.slide_progress_label = tk.Label(
             self.footer_frame,
-            text="Slides: 0 | Queue: 0 | Topics: 0",
+            text="Slide: - / -",
             font=self.small_font,
             fg="#6b7280",
             bg=BACKGROUND_COLOR
         )
-        self.progress_label.pack(side=tk.LEFT)
+        self.slide_progress_label.pack(side=tk.LEFT)
 
-        # Delay indicator
+        # Overall progress (center)
+        self.progress_label = tk.Label(
+            self.footer_frame,
+            text="Lessons: 0 | Queue: 0 | Total slides: 0",
+            font=self.small_font,
+            fg="#6b7280",
+            bg=BACKGROUND_COLOR
+        )
+        self.progress_label.pack(side=tk.LEFT, padx=50)
+
+        # Delay indicator (right)
         self.delay_label = tk.Label(
             self.footer_frame,
             text=f"Delay: {calculate_delay(self.speed):.1f}s",
@@ -233,6 +262,8 @@ class PresentationEngine:
         self.root.bind('<Down>', lambda e: self._adjust_speed(-25))
         self.root.bind('q', lambda e: self.stop())
         self.root.bind('Q', lambda e: self.stop())
+        self.root.bind('n', lambda e: self._skip_to_next_lesson())
+        self.root.bind('N', lambda e: self._skip_to_next_lesson())
 
         # Style for slider
         style = ttk.Style()
@@ -255,20 +286,38 @@ class PresentationEngine:
         """Toggle pause state"""
         self.paused = not self.paused
         if self.paused:
-            self.status_label.config(text="● PAUSED", fg="#fbbf24")
+            self.status_label.config(text="PAUSED", fg="#fbbf24")
         else:
-            self.status_label.config(text="● RUNNING", fg="#4ade80")
+            self.status_label.config(text="RUNNING", fg="#4ade80")
 
-    def add_slide(self, slide: Slide):
-        """Add a slide to the queue"""
-        self.slide_queue.put(slide)
+    def _skip_to_next_lesson(self):
+        """Skip to the next lesson"""
+        if self.current_lesson:
+            self.current_slide_index = len(self.current_lesson.slides)
 
-    def display_slide(self, slide: Slide):
+    def queue_lesson(self, lesson: Lesson):
+        """Add a lesson to the queue"""
+        self.lesson_queue.put(lesson)
+        self._update_waiting_state()
+
+    def _update_waiting_state(self):
+        """Update waiting state based on queue"""
+        was_waiting = self.waiting_for_content
+        self.waiting_for_content = (
+            self.lesson_queue.empty() and
+            (self.current_lesson is None or
+             self.current_slide_index >= len(self.current_lesson.slides))
+        )
+
+        if self.waiting_for_content and not was_waiting:
+            self.base_delay_multiplier = 2.0  # Slow down when waiting
+        elif not self.waiting_for_content and was_waiting:
+            self.base_delay_multiplier = 1.0  # Return to normal
+
+    def display_slide(self, slide: Slide, slide_num: int, total_slides: int):
         """Display a slide on screen"""
         if not self.root:
             return
-
-        self.current_slide = slide
 
         # Update topic
         topic_text = f"Topic: {slide.topic.title()}" if slide.topic else ""
@@ -287,20 +336,22 @@ class PresentationEngine:
         # Update source
         source_text = ""
         if slide.source_url:
-            # Truncate URL for display
             url = slide.source_url
             if len(url) > 80:
                 url = url[:77] + "..."
             source_text = f"Source: {url}"
         self.source_label.config(text=source_text)
 
+        # Update slide progress
+        self.slide_progress_label.config(text=f"Slide: {slide_num} / {total_slides}")
+
         # Update image
-        self._display_image(slide.images[0] if slide.images else None)
+        self._display_image(slide.images[0] if slide.images else None, slide.slide_type)
 
         # Force update
         self.root.update_idletasks()
 
-    def _display_image(self, image_path: str = None):
+    def _display_image(self, image_path: str = None, slide_type: str = "content"):
         """Display an image or placeholder"""
         if image_path:
             try:
@@ -328,26 +379,59 @@ class PresentationEngine:
             except Exception as e:
                 print(f"Error loading image: {e}")
 
-        # Show chess piece placeholder
-        pieces = ["♔", "♕", "♖", "♗", "♘", "♙", "♚", "♛", "♜", "♝", "♞", "♟"]
-        import random
+        # Show chess piece placeholder based on slide type
+        pieces = {
+            'title': ["♔", "♚"],
+            'content': ["♕", "♛", "♖", "♜", "♗", "♝"],
+            'image': ["♘", "♞"],
+            'transition': ["..."],
+            'summary': ["♔", "♚"],
+        }
+        piece_list = pieces.get(slide_type, ["♙", "♟"])
+        self.image_label.config(
+            image="",
+            text=random.choice(piece_list),
+            font=tkfont.Font(family="Segoe UI", size=180)
+        )
+
+    def _show_waiting_screen(self):
+        """Show a waiting screen while content is being generated"""
+        if not self.root:
+            return
+
+        self.topic_label.config(text="")
+        self.title_label.config(text="Preparing Next Lesson...")
+        self.content_label.config(
+            text="Content is being fetched from the web.\n\n"
+                 "The next lesson will begin automatically when ready.\n\n"
+                 "This system continuously searches for new chess content\n"
+                 "to provide you with fresh learning material."
+        )
+        self.source_label.config(text="")
+        self.slide_progress_label.config(text="Slide: - / -")
+        self.status_label.config(text="LOADING", fg="#fbbf24")
+
+        # Animated waiting pieces
+        pieces = ["♔", "♕", "♖", "♗", "♘", "♙"]
         self.image_label.config(
             image="",
             text=random.choice(pieces),
-            font=tkfont.Font(family="Segoe UI", size=200)
+            font=tkfont.Font(family="Segoe UI", size=180)
         )
 
-    def update_progress(self, slides_shown: int, queue_size: int, topics_count: int):
-        """Update progress display"""
+        self.root.update_idletasks()
+
+    def _update_progress(self):
+        """Update overall progress display"""
         if self.progress_label:
             self.progress_label.config(
-                text=f"Slides: {slides_shown} | Queue: {queue_size} | Topics: {topics_count}"
+                text=f"Lessons: {self.lessons_completed} | "
+                     f"Queue: {self.lesson_queue.qsize()} | "
+                     f"Total slides: {self.total_slides_shown}"
             )
 
     def _presentation_loop(self):
-        """Main presentation loop running in separate thread"""
-        slides_shown = 0
-
+        """Main presentation loop - plays lessons sequentially"""
         while self.running:
             # Check if paused
             while self.paused and self.running:
@@ -356,33 +440,52 @@ class PresentationEngine:
             if not self.running:
                 break
 
-            # Get next slide
-            try:
-                slide = self.slide_queue.get(timeout=0.5)
+            # Get next lesson if needed
+            if self.current_lesson is None or self.current_slide_index >= len(self.current_lesson.slides):
+                # Current lesson is done, get next
+                if self.current_lesson:
+                    self.lessons_completed += 1
+                    if self.root:
+                        self.root.after(0, self._update_progress)
 
-                # Schedule UI update on main thread
+                try:
+                    self.current_lesson = self.lesson_queue.get(timeout=0.5)
+                    self.current_slide_index = 0
+
+                    # Update lesson label
+                    if self.root and self.current_lesson:
+                        lesson_text = f"Lesson {self.lessons_completed + 1}: {self.current_lesson.topic.title()}"
+                        self.root.after(0, lambda t=lesson_text: self.lesson_label.config(text=t))
+                        self.root.after(0, lambda: self.status_label.config(text="RUNNING", fg="#4ade80"))
+
+                except queue.Empty:
+                    # No lessons available, show waiting and request more
+                    self._update_waiting_state()
+                    if self.root:
+                        self.root.after(0, self._show_waiting_screen)
+                    if self.on_need_lesson:
+                        self.on_need_lesson()
+                    time.sleep(1)  # Wait a bit before checking again
+                    continue
+
+            # Display current slide
+            if self.current_lesson and self.current_slide_index < len(self.current_lesson.slides):
+                slide = self.current_lesson.slides[self.current_slide_index]
+                total_slides = len(self.current_lesson.slides)
+
                 if self.root:
-                    self.root.after(0, lambda s=slide: self.display_slide(s))
+                    self.root.after(0, lambda s=slide, n=self.current_slide_index+1, t=total_slides:
+                                   self.display_slide(s, n, t))
 
-                slides_shown += 1
+                self.current_slide_index += 1
+                self.total_slides_shown += 1
 
-                # Update progress
                 if self.root:
-                    self.root.after(0, lambda: self.update_progress(
-                        slides_shown,
-                        self.slide_queue.qsize(),
-                        0
-                    ))
+                    self.root.after(0, self._update_progress)
 
-                # Wait based on speed
-                delay = calculate_delay(self.speed)
+                # Calculate delay based on speed and waiting state
+                delay = calculate_delay(self.speed) * self.base_delay_multiplier
                 time.sleep(delay)
-
-            except queue.Empty:
-                # Request more content
-                if self.on_need_content:
-                    self.on_need_content()
-                time.sleep(0.5)
 
     def start(self):
         """Start the presentation"""
@@ -407,22 +510,43 @@ class PresentationEngine:
 
 # Test
 if __name__ == "__main__":
-    def need_content():
-        print("Need more content!")
+    def need_lesson():
+        print("Need more lessons!")
 
-    engine = PresentationEngine(on_need_content=need_content)
+    engine = PresentationEngine(on_need_lesson=need_lesson)
 
-    # Add test slides
-    test_slide = Slide(
-        id="test1",
-        title="Welcome to Chess Learning",
-        content="Chess is a two-player strategy board game played on a checkered board with 64 squares arranged in an 8×8 grid. The game is played by millions of people worldwide.",
-        excerpts=[],
-        images=[],
-        source_url="https://example.com",
+    # Add test lesson
+    test_slides = [
+        Slide(
+            id="test1",
+            title="Welcome to Chess",
+            content="Chess is a game of strategy.",
+            excerpts=[],
+            images=[],
+            source_url="",
+            topic="chess basics",
+            slide_type="title"
+        ),
+        Slide(
+            id="test2",
+            title="The Board",
+            content="The chess board has 64 squares.",
+            excerpts=[],
+            images=[],
+            source_url="",
+            topic="chess basics",
+            slide_type="content"
+        ),
+    ]
+
+    test_lesson = Lesson(
+        id="test",
+        title="Test Lesson",
         topic="chess basics",
-        slide_type="content"
+        slides=test_slides,
+        created_at="",
+        source_urls=[],
+        estimated_duration=10.0
     )
-    engine.add_slide(test_slide)
-
+    engine.queue_lesson(test_lesson)
     engine.start()
