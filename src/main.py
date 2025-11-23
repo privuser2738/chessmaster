@@ -33,9 +33,9 @@ class LessonBuilder:
         self.thread = None
 
         # Configuration
-        self.min_queue_size = 3  # Minimum lessons to keep queued
-        self.max_queue_size = 10  # Maximum lessons to queue
-        self.content_per_lesson = 2  # Content items per lesson
+        self.min_queue_size = 3
+        self.max_queue_size = 10
+        self.content_per_lesson = 2
 
         # Statistics
         self.lessons_built = 0
@@ -43,34 +43,28 @@ class LessonBuilder:
         self.topics_searched = 0
 
     def start(self):
-        """Start the background lesson builder"""
         self.running = True
         self.thread = threading.Thread(target=self._build_loop, daemon=True)
         self.thread.start()
         print("[LessonBuilder] Started background lesson generation")
 
     def stop(self):
-        """Stop the lesson builder"""
         self.running = False
         if self.thread:
             self.thread.join(timeout=2)
         print("[LessonBuilder] Stopped")
 
     def _build_loop(self):
-        """Main loop that continuously builds lessons"""
         while self.running:
             try:
                 queue_size = self.data_manager.presentation_queue.size
 
-                # Always try to maintain minimum queue
                 if queue_size < self.min_queue_size:
                     self._build_lesson()
-                # If under max, build more but slower
                 elif queue_size < self.max_queue_size:
-                    time.sleep(2)  # Brief pause
+                    time.sleep(2)
                     self._build_lesson()
                 else:
-                    # Queue is full, wait before checking again
                     time.sleep(5)
 
             except Exception as e:
@@ -78,14 +72,12 @@ class LessonBuilder:
                 time.sleep(3)
 
     def _build_lesson(self):
-        """Build a single lesson by fetching content and creating slides"""
         topic = self.searcher.get_next_topic()
         print(f"\n[LessonBuilder] Building lesson: {topic}")
         self.topics_searched += 1
 
         content_items = []
 
-        # Fetch content from web
         try:
             fetched = self.searcher.fetch_topic_content(topic)
             for content in fetched[:self.content_per_lesson]:
@@ -97,7 +89,6 @@ class LessonBuilder:
         except Exception as e:
             print(f"  [!] Fetch error: {e}")
 
-        # If we didn't get enough from web, use cached content
         while len(content_items) < self.content_per_lesson:
             cached = self.data_manager.get_unused_content()
             if cached:
@@ -106,17 +97,15 @@ class LessonBuilder:
             else:
                 break
 
-        # Build and queue the lesson
         if content_items:
             lesson = self.data_manager.build_lesson(content_items, topic)
             self.data_manager.queue_lesson(lesson)
             self.lessons_built += 1
-            print(f"  [=] Lesson queued: {len(lesson.slides)} slides, ~{lesson.estimated_duration:.0f}s")
+            print(f"  [=] Lesson queued (total in queue: {self.data_manager.presentation_queue.size})")
         else:
             print(f"  [!] No content available for lesson")
 
     def get_stats(self) -> dict:
-        """Get builder statistics"""
         return {
             'lessons_built': self.lessons_built,
             'content_fetched': self.content_fetched,
@@ -137,22 +126,17 @@ class ChessMaster:
         self.presentation: PresentationEngine = None
 
     def _on_need_lesson(self):
-        """Callback when presentation needs more lessons"""
-        # The lesson builder runs continuously, so this is mainly for logging
         queue_status = self.data_manager.get_queue_status()
         if queue_status['is_empty']:
             print("[ChessMaster] Waiting for next lesson to be built...")
 
     def _initial_lesson_build(self):
-        """Build initial lessons before starting presentation"""
         print("\n=== Building Initial Lessons ===")
 
-        # First check for existing cached content
         cached_count = len(self.data_manager.content_cache)
         if cached_count > 0:
             print(f"Found {cached_count} cached content items")
 
-            # Build a lesson from cached content immediately
             content_items = []
             for _ in range(2):
                 cached = self.data_manager.get_unused_content()
@@ -167,7 +151,6 @@ class ChessMaster:
                 self.data_manager.queue_lesson(lesson)
                 print(f"  [+] Built lesson from cache: {len(lesson.slides)} slides")
 
-        # Fetch fresh content for first lesson
         print("Fetching fresh content from the web...")
         topic = self.searcher.get_next_topic()
         print(f"  Searching: {topic}")
@@ -195,7 +178,6 @@ class ChessMaster:
         print("=== Starting Presentation ===\n")
 
     def start(self):
-        """Start the ChessMaster presentation system"""
         print("""
 +===============================================================+
 |           ChessMaster Learning System                         |
@@ -221,32 +203,19 @@ class ChessMaster:
 
         # Create components
         self.lesson_builder = LessonBuilder(self.searcher, self.data_manager)
-        self.presentation = PresentationEngine(on_need_lesson=self._on_need_lesson)
-        self.presentation.speed = self.speed
 
-        # Build initial lessons
+        # Build initial lessons FIRST
         self._initial_lesson_build()
+
+        # Now create presentation with data_manager reference
+        self.presentation = PresentationEngine(
+            data_manager=self.data_manager,
+            on_need_lesson=self._on_need_lesson
+        )
+        self.presentation.speed = self.speed
 
         # Start background lesson builder
         self.lesson_builder.start()
-
-        # Connect presentation to lesson queue
-        # The presentation will pull from data_manager.presentation_queue
-        def queue_to_presentation():
-            """Bridge: moves lessons from data_manager queue to presentation"""
-            while self.running:
-                try:
-                    lesson = self.data_manager.get_next_lesson(timeout=1.0)
-                    if lesson and self.presentation:
-                        self.presentation.queue_lesson(lesson)
-                        print(f"[Queue] Sent lesson to presentation: {lesson.title}")
-                except Exception as e:
-                    if self.running:
-                        time.sleep(0.5)
-
-        # Start queue bridge thread
-        bridge_thread = threading.Thread(target=queue_to_presentation, daemon=True)
-        bridge_thread.start()
 
         # Start presentation (blocks until closed)
         try:
@@ -257,15 +226,12 @@ class ChessMaster:
             self.stop()
 
     def stop(self):
-        """Stop the system"""
         print("\nShutting down ChessMaster...")
         self.running = False
 
-        # Stop lesson builder
         if self.lesson_builder:
             self.lesson_builder.stop()
 
-        # Print statistics
         dm_stats = self.data_manager.get_statistics()
         builder_stats = self.lesson_builder.get_stats() if self.lesson_builder else {}
 
@@ -283,7 +249,6 @@ Lessons Saved: {dm_stats.get('lessons_saved', 0)}
 
 
 def main():
-    """Main entry point"""
     parser = argparse.ArgumentParser(
         description="ChessMaster - Sequential Chess Learning Presentation System"
     )
@@ -294,26 +259,16 @@ def main():
         help=f'Presentation speed (1-200, default: {DEFAULT_SPEED}). '
              '1=very slow (~30s), 100=default (~5s), 200=fast (~0.2s)'
     )
-    parser.add_argument(
-        '--min-queue',
-        type=int,
-        default=3,
-        help='Minimum lessons to keep in queue (default: 3)'
-    )
 
     args = parser.parse_args()
-
-    # Validate speed
     speed = max(1, min(200, args.speed))
 
-    # Handle Ctrl+C gracefully
     def signal_handler(sig, frame):
         print("\nInterrupted by user")
         sys.exit(0)
 
     signal.signal(signal.SIGINT, signal_handler)
 
-    # Start ChessMaster
     chess_master = ChessMaster(speed=speed)
     chess_master.start()
 
